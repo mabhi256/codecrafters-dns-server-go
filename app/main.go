@@ -8,8 +8,8 @@ import (
 )
 
 /*
-*	15  14 13 12 11  10  9  8  7  6 5 4  3 2 1 0
-*  |QR|   Opcode    |AA|TC|RD|RA|   Z   | RCODE |
+*	 0   1 2 3 4    5  6  7  8   9 10 11   12 13 14 15
+*  |QR|   Opcode   |AA|TC|RD|RA|    Z    |    RCODE   |
 *
 *	QR      	Query/Response Indicator, 1 bit
 * 	OPCODE  	Operation Code, 4 bit
@@ -60,12 +60,19 @@ func main() {
 
 		header := buf[:12]
 		// Set QR bit to make it a response
-		header[2] |= 0x80 // 10000000 in binary
+		header[2] |= 0x80                          // 10000000 in binary
+		binary.BigEndian.PutUint16(header[6:8], 1) // Set ANCOUNT to 1 (bytes 6-7)
+
+		flags := binary.BigEndian.Uint16(header[2:4])
+		opcode := (flags >> 11) & 0x0F // 0x0F = 0b1111 in binary, can also (flags >> 11) & 15
+		if opcode != 0 {
+			// Clear the bottom 4 bits (RCODE) and set to 4
+			flags = (flags & 0xFFF0) | 4                   // 0xFFF0 = 0b1111111111110000
+			binary.BigEndian.PutUint16(header[2:4], flags) // Write the updated flags back to the header
+		}
 
 		name, questionEnd := getQuestionEnd(buf)
 		question := buf[12:questionEnd]
-
-		binary.BigEndian.PutUint16(header[6:8], 1) // Set ANCOUNT to 1 (bytes 6-7)
 
 		answer := append([]byte{}, name...)                // Copy name first
 		answer = binary.BigEndian.AppendUint16(answer, 1)  // Type: 1 (A record)
