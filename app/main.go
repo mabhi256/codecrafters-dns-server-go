@@ -60,8 +60,7 @@ func main() {
 
 		header := buf[:12]
 		// Set QR bit to make it a response
-		header[2] |= 0x80                          // 10000000 in binary
-		binary.BigEndian.PutUint16(header[6:8], 1) // Set ANCOUNT to 1 (bytes 6-7)
+		header[2] |= 0x80 // 10000000 in binary
 
 		flags := binary.BigEndian.Uint16(header[2:4])
 		opcode := (flags >> 11) & 0x0F // 0x0F = 0b1111 in binary, can also (flags >> 11) & 15
@@ -71,15 +70,21 @@ func main() {
 			binary.BigEndian.PutUint16(header[2:4], flags) // Write the updated flags back to the header
 		}
 
-		name, questionEnd := getQuestionEnd(buf)
+		qdCount := binary.BigEndian.Uint16(header[4:6])
+		binary.BigEndian.PutUint16(header[6:8], qdCount) // Set ANCOUNT (bytes 6-7)
+
+		names, questionEnd := getQuestionEnd(buf, qdCount)
 		question := buf[12:questionEnd]
 
-		answer := append([]byte{}, name...)                // Copy name first
-		answer = binary.BigEndian.AppendUint16(answer, 1)  // Type: 1 (A record)
-		answer = binary.BigEndian.AppendUint16(answer, 1)  // Class: 1 (IN)
-		answer = binary.BigEndian.AppendUint32(answer, 60) // TTL: 60
-		answer = binary.BigEndian.AppendUint16(answer, 4)  // RDLENGTH: 4 bytes
-		answer = append(answer, 8, 8, 8, 8)                // RDATA: 8.8.8.8
+		answer := []byte{}
+		for _, name := range names {
+			answer = append(answer, name...)                   // Copy name first
+			answer = binary.BigEndian.AppendUint16(answer, 1)  // Type: 1 (A record)
+			answer = binary.BigEndian.AppendUint16(answer, 1)  // Class: 1 (IN)
+			answer = binary.BigEndian.AppendUint32(answer, 60) // TTL: 60
+			answer = binary.BigEndian.AppendUint16(answer, 4)  // RDLENGTH: 4 bytes
+			answer = append(answer, 8, 8, 8, 8)                // RDATA: 8.8.8.8
+		}
 
 		response := bytes.Join([][]byte{header, question, answer}, nil)
 
@@ -90,19 +95,38 @@ func main() {
 	}
 }
 
-func getQuestionEnd(buf []byte) ([]byte, int) {
+func getQuestionEnd(buf []byte, qdCount uint16) ([][]byte, int) {
 	pos := 12 // start after header
 
+	currQd := 0
+	names := [][]byte{}
+	nameMap := make(map[int][]byte)
+
 	// iterate through domain labels till we get a null terminator
-	for buf[pos] != 0 {
-		labelLen := int(buf[pos])
-		pos += labelLen + 1
+	for currQd != int(qdCount) {
+		// if 1st 2 bit of 1st byte is 11, then it is pointer, the next byte is label start pos
+		// if 1st 2 bit of 1st byte is 00, then treat it as length of label
+		start := pos
+		firstByte := buf[pos]
+		if firstByte == 0xc0 { // 0b1100_0000
+			pos += 1
+			names = append(names, nameMap[int(buf[pos])])
+			pos += 1
+		} else if firstByte != 0 {
+			for buf[pos] != 0 {
+				labelLen := int(buf[pos])
+				pos += labelLen + 1
+			}
+
+			pos += 1                        // null terminator itself
+			nameMap[start] = buf[start:pos] // domain name with
+			fmt.Println("found name:", string(nameMap[start]))
+			names = append(names, nameMap[start])
+		}
+
+		currQd++
+		pos += 4 // QTYPE and QCLASS
 	}
 
-	pos += 1 // null terminator itself
-	name := buf[12:pos]
-
-	pos += 4 // QTYPE and QCLASS
-
-	return name, pos
+	return names, pos
 }
