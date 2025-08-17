@@ -58,14 +58,23 @@ func main() {
 			break
 		}
 
-		questionEnd := getQuestionEnd(buf)
-		response := buf[:questionEnd] // header + question
+		header := buf[:12]
 		// Set QR bit to make it a response
-		response[2] |= 0x80 // 10000000 in binary
+		header[2] |= 0x80 // 10000000 in binary
 
-		// Get QD Count
-		// qdCount := binary.BigEndian.Uint16(header[4:6])
-		// fmt.Println("QDCOUNT:", qdCount)
+		name, questionEnd := getQuestionEnd(buf)
+		question := buf[12:questionEnd]
+
+		binary.BigEndian.PutUint16(header[6:8], 1) // Set ANCOUNT to 1 (bytes 6-7)
+
+		answer := append([]byte{}, name...)                // Copy name first
+		answer = binary.BigEndian.AppendUint16(answer, 1)  // Type: 1 (A record)
+		answer = binary.BigEndian.AppendUint16(answer, 1)  // Class: 1 (IN)
+		answer = binary.BigEndian.AppendUint32(answer, 60) // TTL: 60
+		answer = binary.BigEndian.AppendUint16(answer, 4)  // RDLENGTH: 4 bytes
+		answer = append(answer, 8, 8, 8, 8)                // RDATA: 8.8.8.8
+
+		response := bytes.Join([][]byte{header, question, answer}, nil)
 
 		_, err = udpConn.WriteToUDP(response, source)
 		if err != nil {
@@ -74,7 +83,7 @@ func main() {
 	}
 }
 
-func getQuestionEnd(buf []byte) int {
+func getQuestionEnd(buf []byte) ([]byte, int) {
 	pos := 12 // start after header
 
 	// iterate through domain labels till we get a null terminator
@@ -84,7 +93,9 @@ func getQuestionEnd(buf []byte) int {
 	}
 
 	pos += 1 // null terminator itself
+	name := buf[12:pos]
+
 	pos += 4 // QTYPE and QCLASS
 
-	return pos
+	return name, pos
 }
