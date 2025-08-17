@@ -8,17 +8,17 @@ import (
 )
 
 /*
-*	 0   1 2 3 4    5  6  7  8   9 10 11   12 13 14 15
+*    0   1 2 3 4    5  6  7  8   9 10 11   12 13 14 15
 *  |QR|   Opcode   |AA|TC|RD|RA|    Z    |    RCODE   |
 *
-*	QR      	Query/Response Indicator, 1 bit
-* 	OPCODE  	Operation Code, 4 bit
-* 	AA      	Authoritative Answer, 1 bit
-* 	TC      	Truncation, 1 bit
-* 	RD      	Recursion Desired, 1 bit
-* 	RA      	Recursion Available, 1 bit
-* 	Z       	Reserved, 3 bit
-* 	RCODE   	Response Code, 4 bit
+*   QR          Query/Response Indicator, 1 bit
+*   OPCODE      Operation Code, 4 bit
+*   AA          Authoritative Answer, 1 bit
+*   TC          Truncation, 1 bit
+*   RD          Recursion Desired, 1 bit
+*   RA          Recursion Available, 1 bit
+*   Z           Reserved, 3 bit
+*   RCODE       Response Code, 4 bit
  */
 type DNSHeader struct {
 	ID      uint16 // Packet Identifier (bytes 0-1)
@@ -27,6 +27,12 @@ type DNSHeader struct {
 	ANCOUNT uint16 // Answer Record Count (bytes 6-7)
 	NSCOUNT uint16 // Authority Record Count (bytes 8-9)
 	ARCOUNT uint16 // Additional Record Count (bytes 10-11)
+}
+
+type Question struct {
+	Name  []byte
+	Type  uint16
+	Class uint16
 }
 
 func (h *DNSHeader) ToBytes() []byte {
@@ -64,6 +70,7 @@ func main() {
 
 		flags := binary.BigEndian.Uint16(header[2:4])
 		opcode := (flags >> 11) & 0x0F // 0x0F = 0b1111 in binary, can also (flags >> 11) & 15
+
 		if opcode != 0 {
 			// Clear the bottom 4 bits (RCODE) and set to 4
 			flags = (flags & 0xFFF0) | 4                   // 0xFFF0 = 0b1111111111110000
@@ -73,21 +80,21 @@ func main() {
 		qdCount := binary.BigEndian.Uint16(header[4:6])
 		binary.BigEndian.PutUint16(header[6:8], qdCount) // Set ANCOUNT (bytes 6-7)
 
-		names, questionEnd := getQuestionEnd(buf, qdCount)
-		question := buf[12:questionEnd]
+		questions, questionEnd := getQuestions(buf, qdCount)
+		questionSection := buf[12:questionEnd]
 
-		answer := []byte{}
-		for _, name := range names {
-			answer = append(answer, name...)                   // Copy name first
-			answer = binary.BigEndian.AppendUint16(answer, 1)  // Type: 1 (A record)
-			answer = binary.BigEndian.AppendUint16(answer, 1)  // Class: 1 (IN)
-			answer = binary.BigEndian.AppendUint32(answer, 60) // TTL: 60
-			answer = binary.BigEndian.AppendUint16(answer, 4)  // RDLENGTH: 4 bytes
-			answer = append(answer, 8, 8, 8, 8)                // RDATA: 8.8.8.8
+		// Build answer section using actual question data
+		answerSection := []byte{}
+		for _, q := range questions {
+			answerSection = append(answerSection, q.Name...)                      // Copy name from question
+			answerSection = binary.BigEndian.AppendUint16(answerSection, q.Type)  // Use actual question type
+			answerSection = binary.BigEndian.AppendUint16(answerSection, q.Class) // Use actual question class
+			answerSection = binary.BigEndian.AppendUint32(answerSection, 60)      // TTL: 60
+			answerSection = binary.BigEndian.AppendUint16(answerSection, 4)       // RDLENGTH: 4 bytes
+			answerSection = append(answerSection, 8, 8, 8, 8)                     // RDATA: 8.8.8.8
 		}
 
-		response := bytes.Join([][]byte{header, question, answer}, nil)
-
+		response := bytes.Join([][]byte{header, questionSection, answerSection}, nil)
 		_, err = udpConn.WriteToUDP(response, source)
 		if err != nil {
 			fmt.Println("Failed to send response:", err)
@@ -95,38 +102,58 @@ func main() {
 	}
 }
 
-func getQuestionEnd(buf []byte, qdCount uint16) ([][]byte, int) {
-	pos := 12 // start after header
+// Reads domain name and handles compression
+func parseName(buf []byte, pos int) ([]byte, int) {
+	name := []byte{}
 
-	currQd := 0
-	names := [][]byte{}
-	nameMap := make(map[int][]byte)
-
-	// iterate through domain labels till we get a null terminator
-	for currQd != int(qdCount) {
-		// if 1st 2 bit of 1st byte is 11, then it is pointer, the next byte is label start pos
-		// if 1st 2 bit of 1st byte is 00, then treat it as length of label
-		start := pos
-		firstByte := buf[pos]
-		if firstByte == 0xc0 { // 0b1100_0000
-			pos += 1
-			names = append(names, nameMap[int(buf[pos])])
-			pos += 1
-		} else if firstByte != 0 {
-			for buf[pos] != 0 {
-				labelLen := int(buf[pos])
-				pos += labelLen + 1
-			}
-
-			pos += 1                        // null terminator itself
-			nameMap[start] = buf[start:pos] // domain name with
-			fmt.Println("found name:", string(nameMap[start]))
-			names = append(names, nameMap[start])
+	for {
+		// Check if this is a compression pointer (first two bits are 11)
+		if (buf[pos] & 0xc0) == 0xc0 {
+			// 14 bits next to the compression marker
+			offset := int(binary.BigEndian.Uint16(buf[pos:pos+2]) & 0x3fff)
+			restOfName, _ := parseName(buf, offset)
+			name = append(name, restOfName...)
+			return name, pos + 2 // Return position after the pointer
 		}
 
-		currQd++
-		pos += 4 // QTYPE and QCLASS
+		// Append length or null terminator
+		length := buf[pos]
+		name = append(name, length)
+		pos++
+
+		if length == 0 {
+			break // Null terminator - end of name
+		}
+
+		name = append(name, buf[pos:pos+int(length)]...)
+		pos += int(length)
 	}
 
-	return names, pos
+	return name, pos
+}
+
+func getQuestions(buf []byte, qdCount uint16) ([]Question, int) {
+	pos := 12 // start after header
+	questions := []Question{}
+
+	// Process each question
+	for currQd := 0; currQd < int(qdCount); currQd++ {
+		name, newPos := parseName(buf, pos)
+		pos = newPos
+
+		// Read QTYPE and QCLASS
+		qtype := binary.BigEndian.Uint16(buf[pos : pos+2])
+		qclass := binary.BigEndian.Uint16(buf[pos+2 : pos+4])
+		pos += 4
+
+		question := Question{
+			Name:  name,
+			Type:  qtype,
+			Class: qclass,
+		}
+
+		questions = append(questions, question)
+	}
+
+	return questions, pos
 }
